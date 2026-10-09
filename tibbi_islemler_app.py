@@ -15,7 +15,7 @@ from datetime import datetime
 from collections import Counter
 import openpyxl
 
-APP_VERSION = "2.2"
+APP_VERSION = "2.3"
 GITHUB_REPO = "erdiege01/tibbi-islemler-app"
 VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/version.json"
 
@@ -375,11 +375,18 @@ class TibbiIslemlerApp:
         self._detail_win = win
         win.title("Açıklama Detayı")
         win.transient(self.root)
-        win.configure(bg=self.bg_color)
+        W, H = 600, 400
+        win.geometry(f"{W}x{H}")
+        win.update_idletasks()
         try:
-            win.state("zoomed")  # Tüm ekranı kaplasın
+            rx, ry = self.root.winfo_x(), self.root.winfo_y()
+            rw, rh = self.root.winfo_width(), self.root.winfo_height()
+            x = max(rx + (rw - W) // 2, 0)
+            y = max(ry + (rh - H) // 2, 0)
+            win.geometry(f"{W}x{H}+{x}+{y}")
         except Exception:
             pass
+        win.configure(bg=self.bg_color)
 
         header = tk.Label(win, text=f"{kod} - {ad}", bg=self.bg_color, fg=self.fg_color,
                           font=("Segoe UI", 12, "bold"), anchor=tk.W, justify=tk.LEFT)
