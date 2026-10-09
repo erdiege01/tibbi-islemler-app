@@ -16,8 +16,7 @@ from collections import Counter
 import openpyxl
 
 APP_VERSION = "2.2"
-# GitHub repo adresi (kullanıcıadı/repo). İlk kurulumda güncellenir.
-GITHUB_REPO = "KULLANICI/tibbi-islemler-app"
+GITHUB_REPO = "erdiege01/tibbi-islemler-app"
 VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/version.json"
 
 # Opsiyonel kütüphaneler
