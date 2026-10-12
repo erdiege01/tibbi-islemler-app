@@ -15,7 +15,7 @@ from datetime import datetime
 from collections import Counter
 import openpyxl
 
-APP_VERSION = "2.3"
+APP_VERSION = "2.4"
 GITHUB_REPO = "erdiege01/tibbi-islemler-app"
 VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/version.json"
 
@@ -48,7 +48,20 @@ except ImportError:
     USE_DND = False
 
 
-EXCEL_PATH = r"C:\Users\m.atacan\Downloads\4-genel-tibbi-islemler-listesi-excellxlsx.xlsx"
+DL = r"C:\Users\kevser.cerci2\Downloads"
+# 3 liste: (anahtar, başlık, varsayılan dosya, verinin başladığı satır)
+LISTS = [
+    ("genel", "GENEL TIBBİ İŞLEMLER",
+     DL + r"\4-genel-tibbi-islemler-listesi-excellxlsx (2).xlsx", 3),
+    ("mesai", "MESAİ DIŞINA ESAS TIBBİ İŞLEMLER",
+     DL + r"\6-mesai-disina-esas-tibbi-islemler-listesi-excellxlsx (2).xlsx", 3),
+    ("ozellikli", "ÖZELLİKLİ TIBBİ İŞLEMLER",
+     DL + r"\10-ozellikli-tibbi-islemler-listesi-excellxlsx (2).xlsx", 4),
+]
+LIST_KEYS = [k for k, _, _, _ in LISTS]
+LIST_TITLES = {k: t for k, t, _, _ in LISTS}
+LIST_DEFAULTS = {k: p for k, _, p, _ in LISTS}
+LIST_START_ROWS = {k: s for k, _, _, s in LISTS}
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".tibbi_islemler_config.json")
 
 
@@ -81,9 +94,15 @@ class Config:
             "column_widths": {},
             "search_history": [],
             "favorites": [],
-            "last_file": EXCEL_PATH,
+            "last_file_genel": LIST_DEFAULTS["genel"],
+            "last_file_mesai": LIST_DEFAULTS["mesai"],
+            "last_file_ozellikli": LIST_DEFAULTS["ozellikli"],
         }
         self.load()
+        # Eski tek dosyalı ayarı genel listeye taşı
+        if self.data.get("last_file") and not self.data.get("last_file_migrated"):
+            self.data["last_file_genel"] = self.data["last_file"]
+            self.data["last_file_migrated"] = True
 
     def load(self):
         if os.path.exists(CONFIG_FILE):
@@ -128,13 +147,14 @@ class TibbiIslemlerApp:
         except Exception:
             pass
 
-        # Veri
-        self.all_rows = []
-        self.filtered_rows = []
+        # Veri (3 liste: genel / mesai / ozellikli)
+        self.list_data = {k: {"all": [], "filtered": []} for k in LIST_KEYS}
+        self.trees = {}
+        self.list_headers = {}
+        self.active_key = "genel"
         self.search_history = self.config.get("search_history", [])
         self.favorites = self.config.get("favorites", [])
-        self.sort_column = None
-        self.sort_reverse = False
+        self.sort_states = {k: {"column": None, "reverse": False} for k in LIST_KEYS}
 
         # Filtre durumu
         self.filter_puan_min = None
@@ -180,13 +200,16 @@ class TibbiIslemlerApp:
         self.root.bind("<Control-f>", lambda e: self.search_entry.focus_set())
         self.root.bind("<Control-e>", lambda e: self._export_results())
         self.root.bind("<Control-r>", lambda e: self._load_data())
-        self.root.bind("<Control-o>", lambda e: self._browse_file())
+        self.root.bind("<Control-o>", lambda e: self._browse_file(self.active_key))
         self.root.bind("<Escape>", lambda e: self._clear_search())
         self.root.bind("<F5>", lambda e: self._load_data())
 
     def _build_toolbar(self):
-        """Üst araç çubuğunu oluşturur (sadece arama)."""
-        self.file_var = tk.StringVar(value=self.config.get("last_file", EXCEL_PATH))
+        """Üst araç çubuğunu oluşturur (tek arama kutusu, 3 listeye uygular)."""
+        self.file_vars = {
+            k: tk.StringVar(value=self.config.get(f"last_file_{k}", LIST_DEFAULTS[k]))
+            for k in LIST_KEYS
+        }
 
         toolbar = tk.Frame(self.main_frame, bg=self.bg_color, padx=10, pady=5)
         toolbar.grid(row=0, column=0, columnspan=2, sticky="ew")
@@ -259,6 +282,9 @@ class TibbiIslemlerApp:
         self.stats_labels = {}
         stats_items = [
             ("total", "Toplam Kayıt:"),
+            ("genel", "Genel Tıbbi:"),
+            ("mesai", "Mesai Dışı:"),
+            ("ozellikli", "Özellikli:"),
             ("avg_puan", "Ortalama Puan:"),
             ("max_puan", "En Yüksek Puan:"),
             ("min_puan", "En Düşük Puan:"),
@@ -294,66 +320,84 @@ class TibbiIslemlerApp:
                       bg=self.accent_color, fg="white").pack(fill=tk.X, pady=(10, 0))
 
     def _build_table_panel(self):
-        """Sağ paneli oluşturur (tablo)."""
+        """Sağ paneli oluşturur (3 liste yan yana: genel / mesai / özellikli)."""
         table_frame = tk.Frame(self.main_frame, bg=self.bg_color)
         table_frame.grid(row=1, column=1, sticky="nsew", padx=10, pady=10)
+        self.table_frame = table_frame
+        for i in range(3):
+            table_frame.grid_columnconfigure(i, weight=1)
+        table_frame.grid_rowconfigure(0, weight=1)
 
-        # Tablo
         columns = ("kod", "ad", "aciklama", "puan", "grup")
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="extended")
-
-        self.tree.heading("kod", text="İşlem Kodu", command=lambda: self._sort_by("kod"))
-        self.tree.heading("ad", text="İşlem Adı", command=lambda: self._sort_by("ad"))
-        self.tree.heading("aciklama", text="Açıklama", command=lambda: self._sort_by("aciklama"))
-        self.tree.heading("puan", text="İşlem Puanı", command=lambda: self._sort_by("puan"))
-        self.tree.heading("grup", text="Ameliyat Grupları", command=lambda: self._sort_by("grup"))
-
-        # Sütun genişlikleri
+        headings = {"kod": "İşlem Kodu", "ad": "İşlem Adı", "aciklama": "Açıklama",
+                    "puan": "İşlem Puanı", "grup": "Ameliyat Grupları"}
         default_widths = {"kod": 100, "ad": 250, "aciklama": 400, "puan": 90, "grup": 150}
         saved_widths = self.config.get("column_widths", {})
-        for col in columns:
-            width = saved_widths.get(col, default_widths.get(col, 100))
-            self.tree.column(col, width=width, minwidth=50, stretch=True)
 
-        # Scrollbar
-        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-        table_frame.grid_rowconfigure(0, weight=1)
-        table_frame.grid_columnconfigure(0, weight=1)
-
-        # Pencere genişleyince sütunlar otomatik yayılsın (sağda boşluk kalmasın)
-        self._fit_guard = False
-        self.tree.bind("<Configure>", self._on_tree_configure)
-
-        # Sağ tık menüsü
+        # Sağ tık menüsü (odaklı tabloya uygulanır)
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Kopyala", command=self._copy_selection)
         self.context_menu.add_command(label="Sık kullanılanlara ekle", command=self._add_selected_to_favorites)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="CSV olarak dışa aktar", command=self._export_results)
-        self.tree.bind("<Button-3>", self._show_context_menu)
-        self.tree.bind("<ButtonRelease-1>", self._on_tree_click)
 
-        # Sonuç sayısı
-        self.count_label = tk.Label(table_frame, text="", bg=self.bg_color, fg=self.fg_color)
-        self.count_label.grid(row=2, column=0, sticky=tk.W)
+        for idx, key in enumerate(LIST_KEYS):
+            pane = tk.Frame(table_frame, bg=self.bg_color)
+            pane.grid(row=0, column=idx, sticky="nsew", padx=(0, 5) if idx < 2 else (0, 0))
+            pane.grid_rowconfigure(1, weight=1)
+            pane.grid_columnconfigure(0, weight=1)
+
+            header = tk.Label(pane, text=LIST_TITLES[key], bg=self.bg_color,
+                              fg=self.accent_color, font=("Segoe UI", 10, "bold"))
+            header.grid(row=0, column=0, columnspan=2, sticky=tk.W)
+            self.list_headers[key] = header
+
+            tree = ttk.Treeview(pane, columns=columns, show="headings", selectmode="extended")
+            for col in columns:
+                tree.heading(col, text=headings[col],
+                             command=lambda c=col, k=key: self._sort_by(c, k))
+                width = saved_widths.get(col, default_widths.get(col, 100))
+                tree.column(col, width=width, minwidth=50, stretch=True)
+            self.trees[key] = tree
+
+            vsb = ttk.Scrollbar(pane, orient="vertical", command=tree.yview)
+            hsb = ttk.Scrollbar(pane, orient="horizontal", command=tree.xview)
+            tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+            tree.grid(row=1, column=0, sticky="nsew")
+            vsb.grid(row=1, column=1, sticky="ns")
+            hsb.grid(row=2, column=0, sticky="ew")
+
+            tree.bind("<Button-3>", self._show_context_menu)
+            tree.bind("<ButtonRelease-1>", self._on_tree_click)
+            tree.bind("<FocusIn>", lambda e, k=key: self._set_active_key(k))
+            tree.bind("<Button-1>", lambda e, k=key: self._set_active_key(k))
+
+        # Pencere genişleyince sütunlar otomatik yayılsın (sağda boşluk kalmasın)
+        self._fit_guard = False
+        for tree in self.trees.values():
+            tree.bind("<Configure>", self._on_tree_configure)
+
+    def _set_active_key(self, key):
+        """Odaklanılan/son tıklanan tabloyu aktif liste yapar."""
+        self.active_key = key
 
     def _on_tree_click(self, event):
         """Açıklama hücresine tıklanınca detay penceresi açar."""
-        if self.tree.identify("region", event.x, event.y) != "cell":
+        tree = event.widget
+        for k, t in self.trees.items():
+            if str(t) == str(tree):
+                self.active_key = k
+                break
+        if tree.identify("region", event.x, event.y) != "cell":
             return
-        if self.tree.identify_column(event.x) != "#3":
+        if tree.identify_column(event.x) != "#3":
             return
-        item = self.tree.identify_row(event.y)
+        item = tree.identify_row(event.y)
         if not item:
             return
-        self.tree.selection_set(item)
-        self._show_aciklama_detail(self.tree.item(item, "values"))
+        tree.selection_set(item)
+        self._show_aciklama_detail(tree.item(item, "values"))
 
     def _show_aciklama_detail(self, values):
         """Üstte ameliyat kodu+adı, altta açıklamanın tamamını gösterir."""
@@ -412,9 +456,10 @@ class TibbiIslemlerApp:
         """Tablo genişleyince sütunları orantılı olarak yayar, sağda boşluk bırakmaz."""
         if self._fit_guard:
             return
+        tree = event.widget
         cols = ("kod", "ad", "aciklama", "puan", "grup")
         try:
-            widths = [self.tree.column(c, "width") for c in cols]
+            widths = [tree.column(c, "width") for c in cols]
         except Exception:
             return
         total = sum(widths)
@@ -425,7 +470,7 @@ class TibbiIslemlerApp:
         try:
             extra = avail - total
             for c, w in zip(cols, widths):
-                self.tree.column(c, width=int(w + extra * w / total))
+                tree.column(c, width=int(w + extra * w / total))
         finally:
             self._fit_guard = False
 
@@ -443,25 +488,32 @@ class TibbiIslemlerApp:
                  fg=self.fg_color).pack(side=tk.RIGHT, padx=10)
         self._update_time()
 
-        # Aktif dosya bilgisi (ince ikinci satır)
+        # Aktif dosyalar (3 liste, her satırda değiştir butonu)
         file_bar = tk.Frame(self.main_frame, bg=self.bg_color)
         file_bar.grid(row=2, column=0, columnspan=2, sticky="ew")
-        tk.Label(file_bar, text="Aktif Dosya:", bg=self.bg_color,
-                 fg=self.fg_color).pack(side=tk.LEFT, padx=(10, 2))
-        self.file_label_var = tk.StringVar(value=self.file_var.get())
-        tk.Label(file_bar, textvariable=self.file_label_var, bg=self.bg_color,
-                 fg=self.accent_color, anchor=tk.W).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Button(file_bar, text="Dosya Değiştir", command=self._browse_file,
-                  bg=self.accent_color, fg="white").pack(side=tk.RIGHT, padx=10, pady=2)
+        self.file_label_vars = {}
+        for key in LIST_KEYS:
+            row = tk.Frame(file_bar, bg=self.bg_color)
+            row.pack(fill=tk.X)
+            tk.Label(row, text=f"{LIST_TITLES[key].title()}:", bg=self.bg_color,
+                     fg=self.fg_color, width=28, anchor=tk.W).pack(side=tk.LEFT, padx=(10, 2))
+            self.file_label_vars[key] = tk.StringVar(value=self.file_vars[key].get())
+            tk.Label(row, textvariable=self.file_label_vars[key], bg=self.bg_color,
+                     fg=self.accent_color, anchor=tk.W).pack(side=tk.LEFT, fill=tk.X, expand=True)
+            tk.Button(row, text="Değiştir", command=lambda k=key: self._browse_file(k),
+                      bg=self.accent_color, fg="white").pack(side=tk.RIGHT, padx=10)
 
     def _build_menu(self):
         """Menü çubuğunu oluşturur."""
         menubar = tk.Menu(self.root)
 
-        # Dosya menüsü (dosya ekleme/değiştirme buradan yapılır)
+        # Dosya menüsü (3 liste için ayrı dosya seçimi)
         self.file_menu = tk.Menu(menubar, tearoff=0)
-        self.file_menu.add_command(label="Dosya Seç / Değiştir...", command=self._browse_file, accelerator="Ctrl+O")
-        self.file_menu.add_command(label="Yenile", command=self._load_data, accelerator="F5")
+        self.file_menu.add_command(label="Genel Tıbbi Dosyası Seç...", command=lambda: self._browse_file("genel"))
+        self.file_menu.add_command(label="Mesai Dışı Dosyası Seç...", command=lambda: self._browse_file("mesai"))
+        self.file_menu.add_command(label="Özellikli Dosyası Seç...", command=lambda: self._browse_file("ozellikli"))
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="Yenile (tüm listeler)", command=self._load_data, accelerator="F5")
         self.file_menu.add_command(label="Mevcut Dosya Bilgisi", command=self._show_file_info)
         self.file_menu.add_separator()
         self.file_menu.add_command(label="CSV Olarak Dışa Aktar", command=self._export_results, accelerator="Ctrl+E")
@@ -491,16 +543,22 @@ class TibbiIslemlerApp:
         self.time_var.set(datetime.now().strftime("%H:%M:%S"))
         self.root.after(1000, self._update_time)
 
-    def _update_file_label(self):
-        """Alt bardaki aktif dosya yolunu günceller."""
-        if hasattr(self, "file_label_var"):
-            self.file_label_var.set(self.file_var.get())
+    def _update_file_label(self, key=None):
+        """Alt bardaki aktif dosya yollarını günceller."""
+        if hasattr(self, "file_label_vars"):
+            keys = [key] if key else LIST_KEYS
+            for k in keys:
+                if k in self.file_label_vars:
+                    self.file_label_vars[k].set(self.file_vars[k].get())
 
     def _show_file_info(self):
-        """Mevcut dosya bilgisini gösterir."""
-        path = self.file_var.get()
-        exists = os.path.exists(path) if path else False
-        messagebox.showinfo("Mevcut Dosya", f"Dosya:\n{path}\n\nDurum: {'Mevcut' if exists else 'Bulunamadı'}")
+        """Mevcut dosya bilgilerini gösterir."""
+        lines = []
+        for k in LIST_KEYS:
+            path = self.file_vars[k].get()
+            exists = os.path.exists(path) if path else False
+            lines.append(f"{LIST_TITLES[k]}:\n{path}\nDurum: {'Mevcut' if exists else 'Bulunamadı'}")
+        messagebox.showinfo("Mevcut Dosyalar", "\n\n".join(lines))
 
     @staticmethod
     def _parse_version(v):
@@ -583,52 +641,67 @@ class TibbiIslemlerApp:
         os.startfile(bat_path)
         self._on_close()
 
-    def _browse_file(self):
-        """Dosya seçme penceresi (Dosya menüsünden çağrılır)."""
+    def _browse_file(self, key="genel"):
+        """Liste için Excel dosyası seçme penceresi (Dosya menüsünden çağrılır)."""
         path = filedialog.askopenfilename(
-            title="Excel Dosyası Seç",
+            title=f"{LIST_TITLES[key].title()} - Excel Dosyası Seç",
             filetypes=[("Excel Dosyaları", "*.xlsx *.xls"), ("Tüm Dosyalar", "*.*")]
         )
         if path:
-            self.file_var.set(path)
-            self.config.set("last_file", path)
-            self._update_file_label()
-            self._load_data()
+            self.file_vars[key].set(path)
+            self.config.set(f"last_file_{key}", path)
+            self._update_file_label(key)
+            self._load_list(key)
+            self._apply_filter()
 
-    def _load_data(self):
-        """Excel dosyasını yükler."""
-        path = self.file_var.get()
+    def _load_list(self, key, silent=False):
+        """Tek listenin Excel dosyasını yükler. Başarılıysa True döner."""
+        path = self.file_vars[key].get()
         if not path or not os.path.exists(path):
-            messagebox.showerror("Hata", f"Dosya bulunamadı:\n{path}")
-            return
-
-        self.status_var.set("Dosya yükleniyor...")
-        self.root.update()
-
+            self.list_data[key]["all"] = []
+            if not silent:
+                messagebox.showerror("Hata", f"Dosya bulunamadı ({LIST_TITLES[key]}):\n{path}")
+            return False
         try:
             wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
             ws = wb.active
-            self.all_rows = []
-            for row in ws.iter_rows(min_row=3, values_only=True):
+            rows = []
+            for row in ws.iter_rows(min_row=LIST_START_ROWS[key], values_only=True):
                 kod, ad, aciklama, puan, grup = (list(row) + [None] * 5)[:5]
                 if kod is None and ad is None:
                     continue
-                self.all_rows.append((kod, ad, aciklama, puan, grup))
+                rows.append((kod, ad, aciklama, puan, grup))
             wb.close()
         except Exception as e:
-            messagebox.showerror("Hata", f"Dosya okunamadı:\n{e}")
-            self.status_var.set("Hata oluştu")
-            return
+            if not silent:
+                messagebox.showerror("Hata", f"Dosya okunamadı ({LIST_TITLES[key]}):\n{e}")
+            return False
+        self.list_data[key]["all"] = rows
+        return True
 
-        self.status_var.set(f"{len(self.all_rows)} kayıt yüklendi")
+    def _load_data(self):
+        """3 listenin Excel dosyalarını yükler."""
+        self.status_var.set("Dosyalar yükleniyor...")
+        self.root.update()
+        counts = {}
+        for key in LIST_KEYS:
+            ok = self._load_list(key, silent=True)
+            counts[key] = len(self.list_data[key]["all"])
+            if not ok:
+                self.status_var.set(f"Dosya bulunamadı: {LIST_TITLES[key]} (Dosya menüsünden seçin)")
+        total = sum(counts.values())
+        self.status_var.set(f"{total} kayıt yüklendi "
+                            f"(Genel: {counts['genel']}, Mesai: {counts['mesai']}, Özellikli: {counts['ozellikli']})")
         self._update_grup_filter()
         self._update_favorites_list()
         self._apply_filter()
 
     def _update_grup_filter(self):
-        """Ameliyat grubu filtresini günceller."""
-        grupler = sorted(set(str(row[4]) for row in self.all_rows if row[4] is not None))
-        self.grup_combo['values'] = ["Tümü"] + grupler
+        """Ameliyat grubu filtresini günceller (3 listenin birleşimi)."""
+        grupler = set()
+        for key in LIST_KEYS:
+            grupler.update(str(row[4]) for row in self.list_data[key]["all"] if row[4] is not None)
+        self.grup_combo['values'] = ["Tümü"] + sorted(grupler)
         self.grup_combo.set("Tümü")
 
     def _on_search_change(self, *args):
@@ -685,86 +758,102 @@ class TibbiIslemlerApp:
         self.filter_grup = None
         self._apply_filter()
 
+    def _row_matches(self, row, query_lower):
+        """Tek arama kutusundaki sorgu satıra uyuyor mu (Türkçe duyarsız)."""
+        if not query_lower:
+            return True
+        for val in row:
+            if val is not None and query_lower in tr_lower(val):
+                return True
+        return False
+
+    def _row_matches_puan(self, row):
+        """Puan aralığı filtresi."""
+        if self.filter_puan_min is None and self.filter_puan_max is None:
+            return True
+        puan = row[3]
+        if puan is None:
+            return False
+        try:
+            puan_val = float(puan)
+        except (ValueError, TypeError):
+            return False
+        if self.filter_puan_min is not None and puan_val < self.filter_puan_min:
+            return False
+        if self.filter_puan_max is not None and puan_val > self.filter_puan_max:
+            return False
+        return True
+
+    def _row_matches_grup(self, row):
+        """Ameliyat grubu filtresi."""
+        if self.grup_var.get() == "Tümü":
+            return True
+        return str(row[4]) == self.grup_var.get()
+
     def _apply_filter(self):
-        """Filtreleri uygular."""
+        """Tek arama kutusu + filtreleri 3 listeye uygular."""
         query = self.search_var.get()
         self._add_to_history(query)
+        query_lower = tr_lower(query) if query else ""
 
-        self.filtered_rows = []
-        for row in self.all_rows:
-            # Arama filtresi (büyük/küçük harf duyarsız, Türkçe uyumlu)
-            if query:
-                query_lower = tr_lower(query)
-                found = False
-                for val in row:
-                    if val is not None and query_lower in tr_lower(val):
-                        found = True
-                        break
-                if not found:
-                    continue
-
-            # Puan filtresi
-            if self.filter_puan_min is not None or self.filter_puan_max is not None:
-                puan = row[3]
-                if puan is None:
-                    continue
-                try:
-                    puan_val = float(puan)
-                except (ValueError, TypeError):
-                    continue
-                if self.filter_puan_min is not None and puan_val < self.filter_puan_min:
-                    continue
-                if self.filter_puan_max is not None and puan_val > self.filter_puan_max:
-                    continue
-
-            # Grup filtresi
-            if self.grup_var.get() != "Tümü":
-                if str(row[4]) != self.grup_var.get():
-                    continue
-
-            self.filtered_rows.append(row)
-
-        self._populate_tree()
+        for key in LIST_KEYS:
+            self.list_data[key]["filtered"] = [
+                row for row in self.list_data[key]["all"]
+                if self._row_matches(row, query_lower)
+                and self._row_matches_puan(row)
+                and self._row_matches_grup(row)
+            ]
+            self._populate_tree(key)
         self._update_statistics()
 
-    def _populate_tree(self):
-        """Tabloyu doldurur."""
-        self.tree.delete(*self.tree.get_children())
-        for row in self.filtered_rows:
-            self.tree.insert("", tk.END, values=row)
-        self.count_label.config(text=f"{len(self.filtered_rows)} kayıt gösteriliyor")
+    def _populate_tree(self, key):
+        """Bir listenin tablosunu doldurur."""
+        tree = self.trees[key]
+        tree.delete(*tree.get_children())
+        for row in self.list_data[key]["filtered"]:
+            tree.insert("", tk.END, values=row)
+        n = len(self.list_data[key]["filtered"])
+        self.list_headers[key].config(text=f"{LIST_TITLES[key]} ({n} kayıt)")
 
     def _update_statistics(self):
-        """İstatistikleri günceller."""
-        if not self.filtered_rows:
+        """İstatistikleri günceller (liste bazında + birleşik puan)."""
+        counts = {k: len(self.list_data[k]["filtered"]) for k in LIST_KEYS}
+        total = sum(counts.values())
+        if total == 0:
             for label in self.stats_labels.values():
                 label.config(text="-")
             return
 
         puanlar = []
-        for row in self.filtered_rows:
-            if row[3] is not None:
-                try:
-                    puanlar.append(float(row[3]))
-                except (ValueError, TypeError):
-                    pass
-        grupler = set(str(row[4]) for row in self.filtered_rows if row[4] is not None)
+        grupler = set()
+        for key in LIST_KEYS:
+            for row in self.list_data[key]["filtered"]:
+                if row[3] is not None:
+                    try:
+                        puanlar.append(float(row[3]))
+                    except (ValueError, TypeError):
+                        pass
+                if row[4] is not None:
+                    grupler.add(str(row[4]))
 
-        self.stats_labels["total"].config(text=str(len(self.filtered_rows)))
+        self.stats_labels["total"].config(text=str(total))
+        for k in LIST_KEYS:
+            self.stats_labels[k].config(text=str(counts[k]))
         self.stats_labels["avg_puan"].config(text=f"{sum(puanlar)/len(puanlar):.2f}" if puanlar else "-")
         self.stats_labels["max_puan"].config(text=str(max(puanlar)) if puanlar else "-")
         self.stats_labels["min_puan"].config(text=str(min(puanlar)) if puanlar else "-")
         self.stats_labels["unique_grup"].config(text=str(len(grupler)))
 
-    def _sort_by(self, col):
-        """Sütuna göre sıralama yapar."""
+    def _sort_by(self, col, key="genel"):
+        """Sütuna göre sıralama yapar (ilgili liste)."""
         col_idx = {"kod": 0, "ad": 1, "aciklama": 2, "puan": 3, "grup": 4}[col]
+        state = self.sort_states[key]
 
-        if self.sort_column == col:
-            self.sort_reverse = not self.sort_reverse
+        if state["column"] == col:
+            state["reverse"] = not state["reverse"]
         else:
-            self.sort_column = col
-            self.sort_reverse = False
+            state["column"] = col
+            state["reverse"] = False
 
         def sort_key(row):
             val = row[col_idx]
@@ -774,8 +863,8 @@ class TibbiIslemlerApp:
                 return (0, val)
             return (0, str(val))
 
-        self.filtered_rows.sort(key=sort_key, reverse=self.sort_reverse)
-        self._populate_tree()
+        self.list_data[key]["filtered"].sort(key=sort_key, reverse=state["reverse"])
+        self._populate_tree(key)
 
     def _toggle_theme(self):
         """Tema değiştirir."""
@@ -784,37 +873,45 @@ class TibbiIslemlerApp:
         messagebox.showinfo("Tema", "Tema değişikliği için uygulamayı yeniden başlatın.")
 
     def _reset_column_widths(self):
-        """Sütun genişliklerini sıfırlar."""
+        """Sütun genişliklerini sıfırlar (3 tabloda)."""
         default_widths = {"kod": 100, "ad": 250, "aciklama": 400, "puan": 90, "grup": 150}
-        for col, width in default_widths.items():
-            self.tree.column(col, width=width)
+        for tree in self.trees.values():
+            for col, width in default_widths.items():
+                tree.column(col, width=width)
         self.config.set("column_widths", {})
 
+    def _active_tree(self):
+        """Odaklı/son tıklanan tablonun Treeview'ı."""
+        return self.trees.get(self.active_key, self.trees["genel"])
+
     def _show_context_menu(self, event):
-        """Sağ tık menüsünü gösterir."""
-        item = self.tree.identify_row(event.y)
+        """Sağ tık menüsünü gösterir (odaklı tabloda)."""
+        tree = event.widget if event.widget in self.trees.values() else self._active_tree()
+        item = tree.identify_row(event.y)
         if item:
-            self.tree.selection_set(item)
+            tree.selection_set(item)
             self.context_menu.post(event.x_root, event.y_root)
 
     def _copy_selection(self):
-        """Seçili satırları kopyalar."""
-        selected = self.tree.selection()
+        """Odaklı tablodaki seçili satırları kopyalar."""
+        tree = self._active_tree()
+        selected = tree.selection()
         if not selected:
             return
         lines = []
         for item in selected:
-            values = self.tree.item(item, "values")
+            values = tree.item(item, "values")
             lines.append("\t".join(str(v) for v in values))
         self.root.clipboard_clear()
         self.root.clipboard_append("\n".join(lines))
         self.status_var.set(f"{len(selected)} satır kopyalandı")
 
     def _add_selected_to_favorites(self):
-        """Seçili satırları sık kullanılanlara ekler."""
-        selected = self.tree.selection()
+        """Odaklı tablodaki seçili satırları sık kullanılanlara ekler."""
+        tree = self._active_tree()
+        selected = tree.selection()
         for item in selected:
-            values = self.tree.item(item, "values")
+            values = tree.item(item, "values")
             fav_text = f"{values[0]} - {values[1]}"
             if fav_text not in self.favorites:
                 self.favorites.append(fav_text)
@@ -859,8 +956,10 @@ class TibbiIslemlerApp:
             self._apply_filter()
 
     def _export_results(self):
-        """Sonuçları CSV olarak dışa aktarır."""
-        if not self.filtered_rows:
+        """Odaklı listenin sonuçlarını CSV olarak dışa aktarır."""
+        key = self.active_key
+        rows = self.list_data[key]["filtered"]
+        if not rows:
             messagebox.showwarning("Uyarı", "Dışa aktarılacak veri yok.")
             return
 
@@ -875,14 +974,15 @@ class TibbiIslemlerApp:
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
                 writer.writerow(["İşlem Kodu", "İşlem Adı", "Açıklama", "İşlem Puanı", "Ameliyat Grupları"])
-                writer.writerows(self.filtered_rows)
-            self.status_var.set(f"{len(self.filtered_rows)} kayıt CSV olarak aktarıldı")
+                writer.writerows(rows)
+            self.status_var.set(f"{len(rows)} kayıt CSV olarak aktarıldı ({LIST_TITLES[key]})")
         except Exception as e:
             messagebox.showerror("Hata", f"Dışa aktarma başarısız:\n{e}")
 
     def _export_excel(self):
-        """Sonuçları Excel olarak dışa aktarır."""
-        if not self.filtered_rows:
+        """3 listenin sonuçlarını tek Excel'de 3 sayfa olarak dışa aktarır."""
+        total = sum(len(self.list_data[k]["filtered"]) for k in LIST_KEYS)
+        if total == 0:
             messagebox.showwarning("Uyarı", "Dışa aktarılacak veri yok.")
             return
 
@@ -895,22 +995,27 @@ class TibbiIslemlerApp:
 
         try:
             wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.append(["İşlem Kodu", "İşlem Adı", "Açıklama", "İşlem Puanı", "Ameliyat Grupları"])
-            for row in self.filtered_rows:
-                ws.append(row)
+            first = True
+            for key in LIST_KEYS:
+                ws = wb.active if first else wb.create_sheet()
+                first = False
+                ws.title = LIST_TITLES[key][:31]
+                ws.append(["İşlem Kodu", "İşlem Adı", "Açıklama", "İşlem Puanı", "Ameliyat Grupları"])
+                for row in self.list_data[key]["filtered"]:
+                    ws.append(row)
             wb.save(path)
-            self.status_var.set(f"{len(self.filtered_rows)} kayıt Excel olarak aktarıldı")
+            self.status_var.set(f"{total} kayıt Excel olarak aktarıldı (3 sayfa)")
         except Exception as e:
             messagebox.showerror("Hata", f"Dışa aktarma başarısız:\n{e}")
 
     def _show_charts(self):
-        """Grafikleri gösterir."""
+        """Grafikleri gösterir (3 listenin birleşik sonuçları)."""
         if not USE_MPL:
             messagebox.showinfo("Bilgi", "Matplotlib kütüphanesi yüklü değil.")
             return
 
-        if not self.filtered_rows:
+        all_filtered = [row for k in LIST_KEYS for row in self.list_data[k]["filtered"]]
+        if not all_filtered:
             messagebox.showwarning("Uyarı", "Grafik için veri yok.")
             return
 
@@ -919,7 +1024,7 @@ class TibbiIslemlerApp:
         chart_window.geometry("800x600")
 
         # Puan dağılımı
-        puanlar = [float(row[3]) for row in self.filtered_rows if row[3] is not None]
+        puanlar = [float(row[3]) for row in all_filtered if row[3] is not None]
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
         ax1.hist(puanlar, bins=20, color=self.accent_color, edgecolor="black")
@@ -928,7 +1033,9 @@ class TibbiIslemlerApp:
         ax1.set_ylabel("Frekans")
 
         # Grup dağılımı
-        grupler = Counter(str(row[4]) for row in self.filtered_rows if row[4] is not None)
+        grupler = Counter()
+        for k in LIST_KEYS:
+            grupler.update(str(row[4]) for row in self.list_data[k]["filtered"] if row[4] is not None)
         ax2.barh(list(grupler.keys())[:10], list(grupler.values())[:10], color=self.accent_color)
         ax2.set_title("En Çok İşlem Yapılan Gruplar (Top 10)")
         ax2.set_xlabel("İşlem Sayısı")
@@ -960,20 +1067,22 @@ Kısayollar:
                           "Excel dosyasındaki tıbbi işlemleri arama, filtreleme ve analiz aracı.")
 
     def _on_drop(self, event):
-        """Sürükle-bırak ile dosya yükleme."""
+        """Sürükle-bırak ile dosya yükleme (odaklı listeye)."""
         path = event.data.strip("{}")
         if os.path.exists(path):
-            self.file_var.set(path)
-            self.config.set("last_file", path)
-            self._update_file_label()
-            self._load_data()
+            key = self.active_key
+            self.file_vars[key].set(path)
+            self.config.set(f"last_file_{key}", path)
+            self._update_file_label(key)
+            self._load_list(key)
+            self._apply_filter()
 
     def _on_close(self):
         """Uygulama kapanırken ayarları kaydeder."""
         # Sütun genişliklerini kaydet
         widths = {}
         for col in ("kod", "ad", "aciklama", "puan", "grup"):
-            widths[col] = self.tree.column(col, "width")
+            widths[col] = self.trees["genel"].column(col, "width")
         self.config.set("column_widths", widths)
         self.config.set("window_size", f"{self.root.winfo_width()}x{self.root.winfo_height()}")
         self.root.destroy()
