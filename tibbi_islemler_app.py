@@ -15,7 +15,7 @@ from datetime import datetime
 from collections import Counter
 import openpyxl
 
-APP_VERSION = "2.4"
+APP_VERSION = "2.5"
 GITHUB_REPO = "erdiege01/tibbi-islemler-app"
 VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/version.json"
 
@@ -320,13 +320,23 @@ class TibbiIslemlerApp:
                       bg=self.accent_color, fg="white").pack(fill=tk.X, pady=(10, 0))
 
     def _build_table_panel(self):
-        """Sağ paneli oluşturur (3 liste yan yana: genel / mesai / özellikli)."""
+        """Sağ panel: üstte 3 geçiş butonu, altta aktif listenin tablosu."""
         table_frame = tk.Frame(self.main_frame, bg=self.bg_color)
         table_frame.grid(row=1, column=1, sticky="nsew", padx=10, pady=10)
         self.table_frame = table_frame
-        for i in range(3):
-            table_frame.grid_columnconfigure(i, weight=1)
-        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+        table_frame.grid_rowconfigure(1, weight=1)
+
+        # Liste geçiş butonları
+        switch_bar = tk.Frame(table_frame, bg=self.bg_color)
+        switch_bar.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        self.switch_buttons = {}
+        for key in LIST_KEYS:
+            btn = tk.Button(switch_bar, text=LIST_TITLES[key],
+                            command=lambda k=key: self._switch_list(k),
+                            font=("Segoe UI", 10, "bold"))
+            btn.pack(side=tk.LEFT, padx=(0, 5), ipadx=10, ipady=3)
+            self.switch_buttons[key] = btn
 
         columns = ("kod", "ad", "aciklama", "puan", "grup")
         headings = {"kod": "İşlem Kodu", "ad": "İşlem Adı", "aciklama": "Açıklama",
@@ -341,11 +351,13 @@ class TibbiIslemlerApp:
         self.context_menu.add_separator()
         self.context_menu.add_command(label="CSV olarak dışa aktar", command=self._export_results)
 
+        self.list_panes = {}
         for idx, key in enumerate(LIST_KEYS):
             pane = tk.Frame(table_frame, bg=self.bg_color)
-            pane.grid(row=0, column=idx, sticky="nsew", padx=(0, 5) if idx < 2 else (0, 0))
+            pane.grid(row=1, column=0, sticky="nsew")
             pane.grid_rowconfigure(1, weight=1)
             pane.grid_columnconfigure(0, weight=1)
+            self.list_panes[key] = pane
 
             header = tk.Label(pane, text=LIST_TITLES[key], bg=self.bg_color,
                               fg=self.accent_color, font=("Segoe UI", 10, "bold"))
@@ -377,6 +389,23 @@ class TibbiIslemlerApp:
         self._fit_guard = False
         for tree in self.trees.values():
             tree.bind("<Configure>", self._on_tree_configure)
+
+        self._switch_list(self.active_key)
+
+    def _switch_list(self, key):
+        """Butonla 3 liste arasında geçiş yapar (tek tablo görünür)."""
+        self.active_key = key
+        for k, pane in self.list_panes.items():
+            if k == key:
+                pane.grid(row=1, column=0, sticky="nsew")
+            else:
+                pane.grid_remove()
+        for k, btn in self.switch_buttons.items():
+            if k == key:
+                btn.config(bg=self.accent_color, fg="white", relief=tk.SUNKEN)
+            else:
+                btn.config(bg="#d0d0d0" if not self.is_dark else "#3a3a3a",
+                           fg=self.fg_color, relief=tk.RAISED)
 
     def _set_active_key(self, key):
         """Odaklanılan/son tıklanan tabloyu aktif liste yapar."""
